@@ -305,7 +305,7 @@ internal class DalamudCommands : IServiceType
 
         chatGui.Print(new SeStringBuilder()
                       .AddItalics("Dalamud:")
-                      .AddText($" {Versioning.GetScmVersion()}")
+                      .AddText($" {Versioning.GetDisplayVersion()}")
                       .Build());
 
         chatGui.Print(new SeStringBuilder()

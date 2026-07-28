@@ -12,6 +12,7 @@ internal static class Versioning
     private static string? gitHashInternal;
     private static string? gitHashClientStructsInternal;
     private static string? branchInternal;
+    private static string? estellBuildDateInternal;
 
     /// <summary>
     /// Gets the Dalamud version.
@@ -43,6 +44,30 @@ internal static class Versioning
         return scmVersionInternal = attrs.First(a => a.Key == "SCMVersion").Value
                                         ?? asm.GetName().Version!.ToString();
     }
+
+    /// <summary>
+    /// estell ビルド日(yyyy-MM-dd)を取得する。ビルド時に Dalamud.csproj が
+    /// AssemblyMetadata("EstellBuildDate") として埋め込む。
+    /// </summary>
+    /// <returns>ビルド日。埋め込まれていない場合は "unknown"。</returns>
+    internal static string GetEstellBuildDate()
+    {
+        if (estellBuildDateInternal != null)
+            return estellBuildDateInternal;
+
+        var asm = typeof(Util).Assembly;
+        var attrs = asm.GetCustomAttributes<AssemblyMetadataAttribute>();
+
+        return estellBuildDateInternal = attrs.FirstOrDefault(a => a.Key == "EstellBuildDate")?.Value ?? "unknown";
+    }
+
+    /// <summary>
+    /// ゲーム内に表示するバージョン文字列を取得する。SCM バージョンの末尾に
+    /// estell ビルド識別子(Estell-Ver-{ビルド日})を付与したもの。
+    /// バージョン一致判定には使わず、必ず <see cref="GetScmVersion"/> を使うこと。
+    /// </summary>
+    /// <returns>表示用のバージョン文字列。</returns>
+    internal static string GetDisplayVersion() => $"{GetScmVersion()} Estell-Ver-{GetEstellBuildDate()}";
 
     /// <summary>
     /// Gets the git commit hash value from the assembly or null if it cannot be found. Will be null for Debug builds,

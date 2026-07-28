@@ -220,6 +220,9 @@
         <!-- names the obj/.../CustomAssemblyInfo.cs file -->
         <PropertyGroup>
             <CustomAssemblyInfoFile>$(IntermediateOutputPath)CustomAssemblyInfo.cs</CustomAssemblyInfoFile>
+            <!-- estell: ゲーム内バージョン表記の末尾に付ける Estell-Ver-{ビルド日}。
+                 CI から -p:EstellBuildDate=yyyy-MM-dd で明示指定も可能。 -->
+            <EstellBuildDate Condition="'$(EstellBuildDate)'==''">$([System.DateTime]::Now.ToString(yyyy-MM-dd))</EstellBuildDate>
         </PropertyGroup>
         <!-- includes the CustomAssemblyInfo for compilation into your project -->
         <ItemGroup>
@@ -246,6 +249,11 @@
             <AssemblyAttributes Include="AssemblyMetadata" Condition="'$(CommitHash)' != ''">
                 <_Parameter1>GitHash</_Parameter1>
                 <_Parameter2>$(CommitHash)</_Parameter2>
+            </AssemblyAttributes>
+            <!-- estell: ゲーム内表示用のビルド日 -->
+            <AssemblyAttributes Include="AssemblyMetadata" Condition="'$(EstellBuildDate)' != ''">
+                <_Parameter1>EstellBuildDate</_Parameter1>
+                <_Parameter2>$(EstellBuildDate)</_Parameter2>
             </AssemblyAttributes>
         </ItemGroup>
         <!-- writes the attribute to the customAssemblyInfo file -->

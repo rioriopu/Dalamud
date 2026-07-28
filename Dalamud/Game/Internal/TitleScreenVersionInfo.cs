@@ -115,7 +115,7 @@ internal sealed unsafe class TitleScreenVersionInfo : IInternalDisposableService
             .Append(SeIconChar.BoxedLetterD.ToIconChar())
             .PopColorType()
             .PopEdgeColorType()
-            .Append($" Dalamud: {Versioning.GetScmVersion()}")
+            .Append($" Dalamud: {Versioning.GetDisplayVersion()}")
             .Append($" - {count} {(count != 1 ? "plugins" : "plugin")} loaded");
 
         if (pm?.SafeMode is true)
