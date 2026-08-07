@@ -17,6 +17,17 @@ internal class DalamudReleases : IServiceType
 {
     private const string VersionInfoUrl = "https://kamori.goats.dev/Dalamud/Release/VersionInfo?track={0}";
 
+    /// <summary>
+    /// estell 独自トラックの配布先。kamori には自前トラックが存在せず、問い合わせると
+    /// 公式 release の情報が返ってくるため、実行中のビルドと必ず食い違って
+    /// 「新しいバージョンがあります」と誤表示されていた。XIVLauncher 側と同様に、
+    /// 自前トラックは静的ホスト(GitHub raw)から取得する。
+    /// </summary>
+    private const string EstellVersionInfoUrl = "https://raw.githubusercontent.com/rioriopu/estell-dalamud-distrib/main/{0}/version";
+
+    /// <summary>estell が自前配布しているトラック名。</summary>
+    private static readonly string[] EstellTracks = ["estell"];
+
     private readonly HappyHttpClient httpClient;
     private readonly DalamudConfiguration config;
 
@@ -42,7 +53,12 @@ internal class DalamudReleases : IServiceType
         if (currentTrack.IsNullOrEmpty())
             return null;
 
-        var url = string.Format(VersionInfoUrl, [currentTrack]);
+        // estell: 自前トラックは kamori に存在しないので、静的ホストの {track}/version を見る。
+        var template = EstellTracks.Contains(currentTrack, StringComparer.OrdinalIgnoreCase)
+                           ? EstellVersionInfoUrl
+                           : VersionInfoUrl;
+
+        var url = string.Format(template, [currentTrack]);
         var response = await this.httpClient.SharedHttpClient.GetAsync(url);
         response.EnsureSuccessStatusCode();
         var content = await response.Content.ReadAsStringAsync();
