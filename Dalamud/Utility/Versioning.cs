@@ -97,7 +97,10 @@ internal static class Versioning
         var asm = typeof(Util).Assembly;
         var attrs = asm.GetCustomAttributes<AssemblyMetadataAttribute>();
 
-        gitHashClientStructsInternal = attrs.First(a => a.Key == "GitHashClientStructs").Value;
+        // estell: 本家は First() だったため、メタデータが欠落していると起動時に
+        // 未処理例外(Sequence contains no matching element)で落ちる。
+        // 他の Get*() と同様に FirstOrDefault + フォールバックにして耐性を持たせる。
+        gitHashClientStructsInternal = attrs.FirstOrDefault(a => a.Key == "GitHashClientStructs")?.Value ?? "N/A";
 
         return gitHashClientStructsInternal;
     }

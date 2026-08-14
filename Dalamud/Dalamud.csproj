@@ -176,7 +176,12 @@
         <DalamudRevisionFile>$(OutputPath)revision.txt</DalamudRevisionFile>
     </PropertyGroup>
 
-    <Target Name="GetVersionData" BeforeTargets="WriteVersionData" Condition="'$(SCMVersion)'=='' And '$(Configuration)'=='Release'">
+    <!-- estell: 本家は条件に '$(SCMVersion)'=='' が入っていたが、CI から SCMVersion を
+         渡すとこのターゲットごとスキップされ、GitHashClientStructs 等のメタデータが
+         書かれなくなる。Versioning.GetGitHashClientStructs() は First() で取り出すため
+         メタデータ欠落は起動時の未処理例外になる(2026-08-14 に発生)。
+         SCMVersion の外部指定は下の PropertyGroup 側で尊重する。 -->
+    <Target Name="GetVersionData" BeforeTargets="WriteVersionData" Condition="'$(Configuration)'=='Release'">
         <Exec Command="git -C &quot;$(ProjectDir.Replace('\','\\'))&quot; rev-list --count HEAD" ConsoleToMSBuild="true">
             <Output TaskParameter="ConsoleOutput" PropertyName="DalamudGitCommitCount" />
         </Exec>
@@ -197,7 +202,8 @@
             <CommitCount>$([System.Text.RegularExpressions.Regex]::Replace($(DalamudGitCommitCount), @"\t|\n|\r", ""))</CommitCount>
             <CommitHash>$([System.Text.RegularExpressions.Regex]::Replace($(DalamudGitCommitHash), @"\t|\n|\r", ""))</CommitHash>
             <Branch>$([System.Text.RegularExpressions.Regex]::Replace($(DalamudGitBranch), @"\t|\n|\r", ""))</Branch>
-            <SCMVersion>$([System.Text.RegularExpressions.Regex]::Replace($(DalamudGitDescribeOutput), @"\t|\n|\r", ""))</SCMVersion>
+            <!-- estell: CI から渡された SCMVersion があればそれを優先する(estell.N 付きの版) -->
+            <SCMVersion Condition="'$(SCMVersion)'==''">$([System.Text.RegularExpressions.Regex]::Replace($(DalamudGitDescribeOutput), @"\t|\n|\r", ""))</SCMVersion>
             <CommitHashClientStructs>$([System.Text.RegularExpressions.Regex]::Replace($(ClientStructsGitDescribeOutput), @"\t|\n|\r", ""))</CommitHashClientStructs>
         </PropertyGroup>
 
