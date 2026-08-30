@@ -32,7 +32,10 @@ public class WindowHost
 {
     private const float FadeInOutTime = 0.072f;
     private const float FocusFadeTime = 0.062f;
-    private const float BlurNoiseOpacity = 0.17f;
+    // [estell] 本家は 0.17。背景ぼかしの上に重ねるフィルムグレインの濃さ。
+    // すりガラス風のスタイルではこの粒状感が目立ち、透明感を損なうため 0 にしている。
+    // 戻す場合は 0.17f にすること(スタイル側からは制御できない値)。
+    private const float BlurNoiseOpacity = 0f;
     private const float MaxBlurStrength = 14f;
     private const string AdditionsPopupName = "WindowSystemContextActions";
 
