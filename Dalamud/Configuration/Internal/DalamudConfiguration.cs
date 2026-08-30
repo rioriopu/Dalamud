@@ -21,6 +21,7 @@ using Dalamud.Storage;
 using Dalamud.Utility;
 
 using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 
 using Serilog;
 using Serilog.Events;
@@ -547,16 +548,25 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
     {
         DalamudConfiguration deserialized = null;
 
+        // [estell] 実際にファイルから読めた本文。読めたときだけスナップショットを更新する。
+        string? loadedText = null;
+
+        // [estell] 型解決に失敗した項目があったか。あった場合は内容が欠けているので
+        // スナップショットを上書きしない(欠けた設定を「正常な設定」として残さないため)。
+        var degraded = false;
+
         try
         {
             await fs.ReadAllTextAsync(path, text =>
             {
-                deserialized =
-                    JsonConvert.DeserializeObject<DalamudConfiguration>(text, SerializerSettings);
+                deserialized = DeserializeLeniently(text, out var hadUnresolvableType);
 
                 // If this reads as null, the file was empty, that's no good
                 if (deserialized == null)
                     throw new Exception("Read config was null.");
+
+                degraded = hadUnresolvableType;
+                loadedText = text;
             });
         }
         catch (FileNotFoundException)
@@ -566,7 +576,16 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
         catch (Exception e)
         {
             Log.Error(e, "Could not load DalamudConfiguration at {Path}, creating new", path);
+
+            // [estell] 本家はここで即座に新規設定を作るため、直後の保存で
+            // 読めなかった設定が上書きされ、利用者は復旧手段を完全に失う。
+            // 上書きされる前に現物を退避し、直近の正常な設定からの復旧を試みる。
+            PreserveBrokenConfig(path);
+            deserialized = TryRestoreSnapshot(path);
         }
+
+        if (loadedText is not null && !degraded)
+            UpdateSnapshot(path, loadedText);
 
         deserialized ??= new DalamudConfiguration();
         deserialized.configPath = path;
@@ -621,6 +640,184 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
         {
             this.Save();
             this.isSaveQueued = false;
+        }
+    }
+
+    /// <summary>
+    /// [estell] 型解決に失敗した項目だけを既定値に落として設定を読む。
+    ///
+    /// 本家は保存用と同じ設定で読むため、解決できない $type が 1 つでもあると
+    /// 設定ファイル全体が捨てられ、プラグイン構成やプロファイルまで失われる。
+    /// プラグインが定義した型は本体より後に、しかも独立した AssemblyLoadContext に
+    /// 読み込まれるため、本体の設定に書き込まれた時点で二度と解決できない。
+    /// 実例として DalamudCNAdapter.CnFontId が DefaultFontSpec に永続化され、
+    /// 利用者の設定が全損した。
+    ///
+    /// JSON 自体の破損など「型解決以外」の異常は握りつぶさない。
+    /// 中途半端に読めた設定を保存し直すと、かえって被害が広がるため。
+    /// </summary>
+    /// <param name="text">設定ファイルの本文。</param>
+    /// <param name="degraded">型解決に失敗した項目があった場合 true。</param>
+    /// <returns>読み込んだ設定。本文が空の場合は null。</returns>
+    private static DalamudConfiguration? DeserializeLeniently(string text, out bool degraded)
+    {
+        var hadUnresolvableType = false;
+
+        var settings = new JsonSerializerSettings
+        {
+            TypeNameHandling = TypeNameHandling.All,
+            TypeNameAssemblyFormatHandling = TypeNameAssemblyFormatHandling.Simple,
+            Formatting = Formatting.Indented,
+            SerializationBinder = new LenientSerializationBinder(),
+            Error = (_, args) =>
+            {
+                if (!IsUnresolvableType(args.ErrorContext.Error))
+                    return;
+
+                hadUnresolvableType = true;
+                args.ErrorContext.Handled = true;
+
+                Log.Warning(
+                    "Could not resolve type at '{Path}' in DalamudConfiguration, falling back to default: {Message}",
+                    args.ErrorContext.Path,
+                    args.ErrorContext.Error.Message);
+            },
+        };
+
+        var result = JsonConvert.DeserializeObject<DalamudConfiguration>(text, settings);
+        degraded = hadUnresolvableType;
+        return result;
+    }
+
+    /// <summary>
+    /// [estell] 例外の連鎖に型解決の失敗が含まれるか調べる。
+    /// </summary>
+    /// <param name="ex">調べる例外。</param>
+    /// <returns>型解決の失敗が含まれる場合 true。</returns>
+    private static bool IsUnresolvableType(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is UnresolvableTypeException)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// [estell] 復旧用スナップショットのパスを返す。
+    /// </summary>
+    /// <param name="path">設定ファイルのパス。</param>
+    /// <returns>スナップショットのパス。</returns>
+    private static string GetSnapshotPath(string path) => path + ".good";
+
+    /// <summary>
+    /// [estell] 正常に読めた設定を控えとして残す。次回の読み込みに失敗したとき、ここから復旧する。
+    /// 書き込み途中で中断しても壊れないよう、一時ファイル経由で置き換える。
+    /// </summary>
+    /// <param name="path">設定ファイルのパス。</param>
+    /// <param name="text">正常に読めた本文。</param>
+    private static void UpdateSnapshot(string path, string text)
+    {
+        var snapshot = GetSnapshotPath(path);
+
+        try
+        {
+            var temp = snapshot + ".tmp";
+            File.WriteAllText(temp, text);
+            File.Move(temp, snapshot, true);
+        }
+        catch (Exception ex)
+        {
+            // 控えが作れなくても起動は妨げない
+            Log.Warning(ex, "Failed to update DalamudConfiguration snapshot at {Path}", snapshot);
+        }
+    }
+
+    /// <summary>
+    /// [estell] 読めなかった設定を、新規設定で上書きされる前に退避する。
+    /// これが無いと、利用者は原因調査も手動復旧もできなくなる。
+    /// </summary>
+    /// <param name="path">設定ファイルのパス。</param>
+    private static void PreserveBrokenConfig(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return;
+
+            var preserved = $"{path}.broken-{DateTime.Now:yyyyMMdd_HHmmss}";
+            File.Copy(path, preserved, true);
+            Log.Warning("Preserved unreadable DalamudConfiguration as {Path}", preserved);
+
+            PruneBrokenConfigs(path);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to preserve unreadable DalamudConfiguration at {Path}", path);
+        }
+    }
+
+    /// <summary>
+    /// [estell] 退避した設定が際限なく溜まらないよう、新しいものから 5 世代だけ残す。
+    /// タイムスタンプは辞書順が時系列順になる書式なので、名前で並べ替えれば足りる。
+    /// </summary>
+    /// <param name="path">設定ファイルのパス。</param>
+    private static void PruneBrokenConfigs(string path)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(directory))
+            return;
+
+        var stale = Directory.GetFiles(directory, Path.GetFileName(path) + ".broken-*")
+                             .OrderByDescending(x => x)
+                             .Skip(5);
+
+        foreach (var file in stale)
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to prune old DalamudConfiguration backup {Path}", file);
+            }
+        }
+    }
+
+    /// <summary>
+    /// [estell] 直近の正常な設定から復旧する。
+    /// </summary>
+    /// <param name="path">設定ファイルのパス。</param>
+    /// <returns>復旧できた設定。控えが無い、または読めない場合は null。</returns>
+    private static DalamudConfiguration? TryRestoreSnapshot(string path)
+    {
+        var snapshot = GetSnapshotPath(path);
+
+        try
+        {
+            if (!File.Exists(snapshot))
+            {
+                Log.Warning("No DalamudConfiguration snapshot at {Path}, starting fresh", snapshot);
+                return null;
+            }
+
+            var restored = DeserializeLeniently(File.ReadAllText(snapshot), out _);
+            if (restored is null)
+            {
+                Log.Error("DalamudConfiguration snapshot at {Path} was empty", snapshot);
+                return null;
+            }
+
+            Log.Information("Restored DalamudConfiguration from snapshot {Path}", snapshot);
+            return restored;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to restore DalamudConfiguration from snapshot {Path}", snapshot);
+            return null;
         }
     }
 
@@ -703,6 +900,44 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
             catch (Exception ex)
             {
                 Log.Error(ex, "Exception during raise of {handler}", action.Method);
+            }
+        }
+    }
+
+    /// <summary>
+    /// [estell] 型名を解決できなかったことを示す内部例外。
+    /// Newtonsoft が投げるその他の JsonSerializationException と区別するために使う。
+    /// </summary>
+    private sealed class UnresolvableTypeException : Exception
+    {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="UnresolvableTypeException"/> class.
+        /// </summary>
+        /// <param name="assemblyName">解決できなかったアセンブリ名。</param>
+        /// <param name="typeName">解決できなかった型名。</param>
+        /// <param name="innerException">Newtonsoft が投げた元の例外。</param>
+        public UnresolvableTypeException(string? assemblyName, string typeName, Exception innerException)
+            : base($"Could not resolve type '{typeName}, {assemblyName}'.", innerException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// [estell] 型名を解決できないときに <see cref="UnresolvableTypeException"/> を投げるバインダ。
+    /// これにより「型が解決できないだけ」の失敗と、それ以外の本物の異常を呼び出し側で区別できる。
+    /// </summary>
+    private sealed class LenientSerializationBinder : DefaultSerializationBinder
+    {
+        /// <inheritdoc/>
+        public override Type BindToType(string? assemblyName, string typeName)
+        {
+            try
+            {
+                return base.BindToType(assemblyName, typeName);
+            }
+            catch (Exception ex)
+            {
+                throw new UnresolvableTypeException(assemblyName, typeName, ex);
             }
         }
     }
