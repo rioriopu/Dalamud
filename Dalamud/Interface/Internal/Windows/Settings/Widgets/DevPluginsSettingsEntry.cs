@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
@@ -33,6 +34,18 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
     private string devPluginLocationAddError = string.Empty;
     private bool hadDevPlugins;
 
+    // [estell] TryGetError の結果をここに持つ。
+    //
+    // 本家(3a9ec4b3c で追加)は Draw() から直接 TryGetError を呼んでおり、
+    // その中で File.Exists が最大2回走る。ImGui の Draw は表示中ずっと毎フレーム
+    // 呼ばれるため、登録件数ぶんのファイルI/Oが毎フレーム発生していた。
+    // 到達できないネットワーク共有では SMB のタイムアウト待ちで1回 300ms を超え、
+    // Experimental タブを開いている間だけゲームが極端に重くなる。
+    //
+    // 存在確認の結果は毎フレーム変わるものではないので、間隔を置いて評価する。
+    private readonly Dictionary<string, (bool HasError, LocationError Error)> errorCache = new();
+    private readonly Stopwatch errorCacheAge = new();
+
     public DevPluginsSettingsEntry(Func<bool>? visibility = null)
     {
         this.Name = LazyLoc.Localize("DalamudSettingsDevPluginLocation", "Dev Plugin Locations");
@@ -54,6 +67,7 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
         this.devPluginLocations =
             [.. Service<DalamudConfiguration>.Get().DevPluginLoadLocations.Select(x => x.Clone())];
         this.devPluginLocationsChanged = false;
+        this.InvalidateErrorCache();   // [estell] 開き直したら存在確認をやり直す
         if (this.devPluginLocations.Count > 0)
             this.hadDevPlugins = true;
     }
@@ -170,15 +184,18 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
             ImGui.NextColumn();
 
             var dllPath = devPluginLocationSetting.Path;
-            var hasError = this.TryGetError(dllPath, out var error);
+            // [estell] 毎フレーム走るのでキャッシュ経由にする。実体は同じ判定。
+            var hasError = this.TryGetErrorCached(dllPath, out var error);
 
             ImGui.SetNextItemWidth(!hasError ? -1 : ImGui.GetContentRegionAvail().X - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.X);
             if (ImGui.InputText($"##devPluginLocationInput", ref dllPath, 65535, ImGuiInputTextFlags.EnterReturnsTrue) && devPluginLocationSetting.Path != dllPath)
             {
+                // ここは Enter で確定したときだけ通る。毎フレームではないので直接呼ぶ。
                 if (!this.TryGetError(dllPath, out error))
                 {
                     devPluginLocationSetting.Path = dllPath;
                     this.devPluginLocationsChanged = true;
+                    this.InvalidateErrorCache();   // [estell] パスが変わったので次フレームで再評価
                 }
                 else if (error.Loc.Key is "DalamudDevPluginLocationExists" or "DalamudDevPluginInvalid")
                 {
@@ -232,6 +249,7 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
         if (locationToRemove != null)
         {
             this.devPluginLocations.Remove(locationToRemove);
+            this.InvalidateErrorCache();   // [estell] 件数が変わったので作り直す
             this.devPluginLocationsChanged = true;
         }
 
@@ -285,6 +303,7 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
         }
         else
         {
+            this.InvalidateErrorCache();   // [estell] 件数が変わるので作り直す
             this.devPluginLocations.Add(
                 new DevPluginLocationSettings
                 {
@@ -298,6 +317,40 @@ internal sealed class DevPluginsSettingsEntry : SettingsEntry
 
         // Enable ImGui asserts if a dev plugin is added, if no choice was made prior
         Service<DalamudConfiguration>.Get().ImGuiAssertsEnabledAtStartup ??= true;
+    }
+
+    /// <summary>
+    ///     [estell] キャッシュ経由で <see cref="TryGetError"/> の結果を返す。
+    ///     毎フレーム呼ばれる Draw から使うのはこちら。
+    /// </summary>
+    /// <param name="dllPath">確認するパス。</param>
+    /// <param name="error">エラー内容。</param>
+    /// <returns>エラーがある場合 true。</returns>
+    private bool TryGetErrorCached(string dllPath, out LocationError error)
+    {
+        // 一定時間ごとに捨てて作り直す。ファイルを置き直したときに
+        // 警告表示が更新されないと、直したのに直らないように見えてしまう。
+        if (!this.errorCacheAge.IsRunning || this.errorCacheAge.ElapsedMilliseconds > 1000)
+        {
+            this.errorCache.Clear();
+            this.errorCacheAge.Restart();
+        }
+
+        if (!this.errorCache.TryGetValue(dllPath, out var cached))
+        {
+            cached = (this.TryGetError(dllPath, out var freshError), freshError);
+            this.errorCache[dllPath] = cached;
+        }
+
+        error = cached.Error;
+        return cached.HasError;
+    }
+
+    /// <summary>[estell] 次の Draw で存在確認をやり直させる。</summary>
+    private void InvalidateErrorCache()
+    {
+        this.errorCache.Clear();
+        this.errorCacheAge.Reset();
     }
 
     private bool TryGetError(string dllPath, out LocationError error)
