@@ -590,6 +590,33 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
         deserialized ??= new DalamudConfiguration();
         deserialized.configPath = path;
 
+        // [estell] このファイルの DalamudBetaKind を "release" に寄せる。
+        //
+        // 宣言部のコメントどおり、この項目は XLCore/XoM 互換のために置いてあるだけで
+        // Dalamud 本体はどこからも読んでいない。XIVLauncher 側も launcherConfigV3.json の
+        // 同名項目だけを見ており、こちらには書き込まない(DalamudLauncher はパスを渡すのみ)。
+        // 書き手が Dalamud しかいないため、ここで寄せた値はそのまま永続化される。
+        //
+        // 放置すると過去の値が残り続ける。実際に estell トラックの利用者の環境へ
+        // "stg" が残っており、これを読んで動作を止めるプラグインがあった
+        // (AutoDuty の DalamudInfoHelper.IsOnStaging が "release" 以外を staging と判定する)。
+        // estell は goatcorp の stg ではなく release 相当の core を積んでいるので、
+        // staging 扱いされるのは実態と合わない。
+        //
+        // あくまで表示・互換のための正規化で、配信トラックの選択には影響しない。
+        //
+        // 読み手はメモリ上の設定ではなくファイルを直接読むため、値を変えるだけでは足りない。
+        // 変化があったときだけ保存を予約して、起動直後にファイルへ書き出させる
+        // (Framework.Update が毎フレーム DalamudConfiguration.Update を回し、
+        //  予約済みなら Save する。ここから直接 Save は呼べない。Save は
+        //  メインスレッドと ReliableFileStorage サービスを要求するが、
+        //  Load の時点ではどちらもまだ整っていないため)。
+        if (deserialized.DalamudBetaKind != "release")
+        {
+            deserialized.DalamudBetaKind = "release";
+            deserialized.QueueSave();
+        }
+
         try
         {
             deserialized.SetDefaults();
