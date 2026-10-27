@@ -589,11 +589,19 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
             deserialized = TryRestoreSnapshot(path);
         }
 
-        if (loadedText is not null && !degraded)
-            UpdateSnapshot(path, loadedText);
+        if (loadedText is not null)
+        {
+            if (degraded)
+                PreserveBrokenConfig(path, loadedText);
+            else
+                UpdateSnapshot(path, loadedText);
+        }
 
         deserialized ??= new DalamudConfiguration();
         deserialized.configPath = path;
+
+        if (degraded)
+            deserialized.QueueSave();
 
         // [estell] このファイルの DalamudBetaKind を "release" に寄せる。
         //
@@ -694,6 +702,7 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
     private static DalamudConfiguration? DeserializeLeniently(string text, out bool degraded)
     {
         var hadUnresolvableType = false;
+        var invalidDefaultFont = false;
 
         var settings = new JsonSerializerSettings
         {
@@ -707,6 +716,8 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
                     return;
 
                 hadUnresolvableType = true;
+                invalidDefaultFont |= args.ErrorContext.Path == nameof(DefaultFontSpec)
+                                      || args.ErrorContext.Path.StartsWith(nameof(DefaultFontSpec) + ".", StringComparison.Ordinal);
                 args.ErrorContext.Handled = true;
 
                 Log.Warning(
@@ -717,6 +728,14 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
         };
 
         var result = JsonConvert.DeserializeObject<DalamudConfiguration>(text, settings);
+        // 子要素だけを読み飛ばしたSingleFontSpecは非nullでも使用できない。
+        // 仕様全体を既定に戻し、フォント生成側の既存の補完処理へ渡す。
+        if (result is not null && (invalidDefaultFont || result.DefaultFontSpec is SingleFontSpec { FontId: null }))
+        {
+            result.DefaultFontSpec = null;
+            hadUnresolvableType = true;
+            Log.Warning("Invalid default font configuration was reset to the built-in font.");
+        }
         degraded = hadUnresolvableType;
         return result;
     }
@@ -772,15 +791,19 @@ internal sealed class DalamudConfiguration : IInternalDisposableService
     /// これが無いと、利用者は原因調査も手動復旧もできなくなる。
     /// </summary>
     /// <param name="path">設定ファイルのパス。</param>
-    private static void PreserveBrokenConfig(string path)
+    /// <param name="loadedText">取得済みの原文。未指定ならファイルの現物を退避する。</param>
+    private static void PreserveBrokenConfig(string path, string? loadedText = null)
     {
         try
         {
-            if (!File.Exists(path))
+            if (loadedText is null && !File.Exists(path))
                 return;
 
-            var preserved = $"{path}.broken-{DateTime.Now:yyyyMMdd_HHmmss}";
-            File.Copy(path, preserved, true);
+            var preserved = $"{path}.broken-{DateTime.Now:yyyyMMdd_HHmmss_fff}-{Guid.NewGuid():N}";
+            if (loadedText is null)
+                File.Copy(path, preserved);
+            else
+                File.WriteAllText(preserved, loadedText);
             Log.Warning("Preserved unreadable DalamudConfiguration as {Path}", preserved);
 
             PruneBrokenConfigs(path);
